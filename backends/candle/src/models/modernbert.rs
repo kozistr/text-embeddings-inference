@@ -120,14 +120,10 @@ impl ModernBertMLP {
             hidden_states.narrow(D::Minus1, self.intermediate_size, self.intermediate_size)?;
 
         let input = if let Some(activation) = &self.activation {
-            match activation {
-                HiddenAct::Gelu => input.gelu(),
-                HiddenAct::Relu => input.relu(),
-                HiddenAct::Swiglu => input.silu(),
-            }
+            activation.forward(&input)
         } else {
             Ok(input)
-        };
+        }?;
 
         let hidden_states = self.wo.forward(&(input * gate)?)?;
 
@@ -449,10 +445,13 @@ impl ClassificationHead for ModernBertClassificationHead {
         let _enter = self.span.enter();
 
         let hidden_states = hidden_states.unsqueeze(1)?;
+        println!("last_hidden_state: {}", hidden_states);
 
         let hidden_states = self.dense.forward(&hidden_states)?;
         let hidden_states = self.norm.forward(&hidden_states, None)?;
+        println!("pooled_output: {}", hidden_states);
         let hidden_states = self.classifier.forward(&hidden_states)?;
+        println!("logits: {}", hidden_states);
 
         let hidden_states = hidden_states.squeeze(1)?;
 
