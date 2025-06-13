@@ -36,6 +36,7 @@ pub type Predictions = IntMap<usize, Vec<f32>>;
 
 pub trait Backend {
     fn health(&self) -> Result<(), BackendError>;
+
     fn max_batch_size(&self) -> Option<usize> {
         None
     }

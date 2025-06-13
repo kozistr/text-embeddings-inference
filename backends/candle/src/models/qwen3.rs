@@ -369,6 +369,40 @@ impl Qwen3Layer {
     }
 }
 
+pub trait ClassificationHead {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor>;
+}
+
+#[allow(dead_code)]
+pub struct Qwen3RerankerHead {
+    token_true_id: usize,
+    token_false_id: usize,
+
+    span: tracing::Span,
+}
+
+impl Qwen3RerankerHead {
+    pub(crate) fn load(token_true_id: usize, token_false_id: usize) -> Result<Self> {
+        Ok(Self {
+            token_true_id,
+            token_false_id,
+            span: tracing::span!(tracing::Level::TRACE, "rerank"),
+        })
+    }
+}
+
+impl ClassificationHead for Qwen3RerankerHead {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
+        let _enter = self.span.enter();
+
+        let hidden_states = hidden_states.unsqueeze(1)?;
+
+        let hidden_states = hidden_states.squeeze(1)?;
+
+        Ok(hidden_states)
+    }
+}
+
 pub struct Qwen3Model {
     embeddings: Embedding,
     layers: Vec<Qwen3Layer>,
@@ -378,17 +412,25 @@ pub struct Qwen3Model {
     pool: Pool,
     pub device: Device,
     num_attention_heads: usize,
+    classifier: Option<Box<dyn ClassificationHead + Send>>,
 
     span: tracing::Span,
 }
 
 impl Qwen3Model {
     pub fn load(vb: VarBuilder, config: &Qwen3Config, model_type: ModelType) -> Result<Self> {
-        let pool = match model_type {
+        let (pool, classifier) = match model_type {
             ModelType::Classifier => {
-                candle::bail!("`classifier` model type is not supported for Qwen3")
+                let pool: Pool = Pool::LastToken;
+
+                // token id 9693: "yes" token, token id 2152: "no" token in Qwen3 Tokenizer
+                // it'd better to get this value from the tokenizer, but can't find a way to do this seamlessly
+                let classifier: Box<dyn ClassificationHead + Send> =
+                    Box::new(Qwen3RerankerHead::load(9693, 2152)?);
+
+                (pool, Some(classifier))
             }
-            ModelType::Embedding(pool) => pool,
+            ModelType::Embedding(pool) => (pool, None),
         };
 
         // The Qwen3-Reranker models contain the `model` key
@@ -429,6 +471,7 @@ impl Qwen3Model {
             pool,
             device: vb.device().clone(),
             num_attention_heads: config.num_attention_heads,
+            classifier,
             span: tracing::span!(tracing::Level::TRACE, "model"),
         })
     }
@@ -662,5 +705,17 @@ impl Model for Qwen3Model {
 
     fn embed(&self, batch: Batch) -> Result<(Option<Tensor>, Option<Tensor>)> {
         self.forward(batch)
+    }
+
+    fn predict(&self, batch: Batch) -> Result<Tensor> {
+        match &self.classifier {
+            None => candle::bail!("`predict` is not implemented for this model"),
+            Some(classifier) => {
+                let (pooled_embeddings, _raw_embeddings) = self.forward(batch)?;
+                let pooled_embeddings =
+                    pooled_embeddings.expect("pooled_embeddings is empty. This is a bug.");
+                classifier.forward(&pooled_embeddings)
+            }
+        }
     }
 }
